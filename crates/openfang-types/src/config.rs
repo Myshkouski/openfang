@@ -173,7 +173,9 @@ pub enum SearchProvider {
     Perplexity,
     /// DuckDuckGo HTML (no API key needed).
     DuckDuckGo,
-    /// Auto-select based on available API keys (Tavily → Brave → Perplexity → DuckDuckGo).
+    /// SearXNG self-hosted search (no API key needed).
+    Searxng,
+    /// Auto-select based on available API keys (Tavily → Brave → Perplexity → Searxng → DuckDuckGo).
     #[default]
     Auto,
 }
@@ -192,6 +194,8 @@ pub struct WebConfig {
     pub tavily: TavilySearchConfig,
     /// Perplexity Search configuration.
     pub perplexity: PerplexitySearchConfig,
+    /// SearXNG Search configuration.
+    pub searxng: SearxngSearchConfig,
     /// Web fetch configuration.
     pub fetch: WebFetchConfig,
 }
@@ -204,6 +208,7 @@ impl Default for WebConfig {
             brave: BraveSearchConfig::default(),
             tavily: TavilySearchConfig::default(),
             perplexity: PerplexitySearchConfig::default(),
+            searxng: SearxngSearchConfig::default(),
             fetch: WebFetchConfig::default(),
         }
     }
@@ -281,6 +286,14 @@ impl Default for PerplexitySearchConfig {
     }
 }
 
+/// SearXNG self-hosted search configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearxngSearchConfig {
+    /// Base URL of the SearXNG instance (e.g., "https://search.example.com").
+    pub url: String,
+}
+
 /// Web fetch configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -293,6 +306,15 @@ pub struct WebFetchConfig {
     pub timeout_secs: u64,
     /// Enable HTML→Markdown readability extraction.
     pub readability: bool,
+    /// SSRF allowlist for self-hosted environments.
+    ///
+    /// Entries can be exact hostnames (`"n8n.local"`), wildcard domains
+    /// (`"*.olares.com"`), or CIDR ranges (`"10.0.0.0/8"`).
+    ///
+    /// Allowlisted hosts bypass the private-IP check but **never** bypass
+    /// cloud metadata endpoint blocking (169.254.169.254, metadata.google.internal, etc.).
+    #[serde(default)]
+    pub ssrf_allowed_hosts: Vec<String>,
 }
 
 impl Default for WebFetchConfig {
@@ -302,6 +324,7 @@ impl Default for WebFetchConfig {
             max_response_bytes: 10 * 1024 * 1024, // 10 MB
             timeout_secs: 30,
             readability: true,
+            ssrf_allowed_hosts: Vec::new(),
         }
     }
 }
@@ -1138,7 +1161,7 @@ pub struct AuthConfig {
     pub enabled: bool,
     /// Admin username.
     pub username: String,
-    /// SHA256 hash of the password (hex-encoded).
+    /// Argon2id password hash (PHC string format).
     /// Generate with: openfang auth hash-password
     pub password_hash: String,
     /// Session token lifetime in hours (default: 168 = 7 days).
@@ -1769,6 +1792,10 @@ pub struct DiscordConfig {
     /// Default channel ID for outgoing messages when no recipient is specified.
     #[serde(default)]
     pub default_channel_id: Option<String>,
+    /// Channel IDs that respond without requiring @mention (free response mode).
+    /// In these channels, the bot responds to all group messages without needing to be mentioned.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub free_response_channels: Vec<String>,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -1784,6 +1811,7 @@ impl Default for DiscordConfig {
             intents: 37376,
             ignore_bots: true,
             default_channel_id: None,
+            free_response_channels: vec![],
             overrides: ChannelOverrides::default(),
         }
     }
@@ -2590,8 +2618,13 @@ impl Default for MqttConfig {
 pub struct RevoltConfig {
     /// Env var name holding the bot token.
     pub bot_token_env: String,
-    /// Revolt API URL.
+    /// Revolt API URL (set to your self-hosted instance URL if not using revolt.chat).
     pub api_url: String,
+    /// Revolt WebSocket URL (set to your self-hosted instance WS URL if not using revolt.chat).
+    pub ws_url: String,
+    /// Restrict to specific channel IDs (empty = all channels the bot is in).
+    #[serde(default)]
+    pub allowed_channels: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2604,6 +2637,8 @@ impl Default for RevoltConfig {
         Self {
             bot_token_env: "REVOLT_BOT_TOKEN".to_string(),
             api_url: "https://api.revolt.chat".to_string(),
+            ws_url: "wss://ws.revolt.chat".to_string(),
+            allowed_channels: Vec::new(),
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -3588,6 +3623,13 @@ impl KernelConfig {
                     ));
                 }
             }
+            SearchProvider::Searxng => {
+                if self.web.searxng.url.is_empty() {
+                    warnings.push(
+                        "Searxng search selected but searxng.url is not configured".to_string(),
+                    );
+                }
+            }
             SearchProvider::DuckDuckGo | SearchProvider::Auto => {}
         }
 
@@ -3674,6 +3716,26 @@ mod tests {
         "#;
         let dc2: DiscordConfig = toml::from_str(toml_str2).unwrap();
         assert!(dc2.ignore_bots);
+    }
+
+    #[test]
+    fn test_discord_config_free_response_channels_deserialization() {
+        // Test with free_response_channels as list of strings
+        let toml_str = r#"
+            bot_token_env = "DISCORD_BOT_TOKEN"
+            free_response_channels = ["123456789", "987654321"]
+        "#;
+        let dc: DiscordConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(dc.free_response_channels.len(), 2);
+        assert_eq!(dc.free_response_channels[0], "123456789");
+        assert_eq!(dc.free_response_channels[1], "987654321");
+
+        // Test default (empty list)
+        let toml_str2 = r#"
+            bot_token_env = "DISCORD_BOT_TOKEN"
+        "#;
+        let dc2: DiscordConfig = toml::from_str(toml_str2).unwrap();
+        assert!(dc2.free_response_channels.is_empty());
     }
 
     #[test]
