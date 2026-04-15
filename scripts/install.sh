@@ -17,6 +17,7 @@ detect_platform() {
     case "$ARCH" in
         x86_64|amd64) ARCH="x86_64" ;;
         aarch64|arm64) ARCH="aarch64" ;;
+        armv7*|armhf) ARCH="armv7" ;;
         *) echo "  Unsupported architecture: $ARCH"; exit 1 ;;
     esac
     case "$OS" in
